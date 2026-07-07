@@ -48,6 +48,7 @@
 ---
 # Onde 전체 인프라 아키텍처 다이어그램
 
+
 ```mermaid
 flowchart TB
   user[User Browser]
@@ -700,3 +701,77 @@ docker run -d --name onde-backend <ECR_URI>/onde-backend:v1.1
 - Route 53 레코드 관리
 - SSM Parameter Store 읽기/쓰기
 - ECR 이미지 푸시/풀
+
+---
+
+## 트러블슈팅
+
+### 1. Spring Security CORS 설정 + BCrypt 해시 버전 불일치
+
+**문제**
+로컬 개발 환경에서 프론트엔드(React)에서 백엔드 API 로그인 요청 시 CORS 에러가 발생했고, 에러를 해결한 이후에도 로그인이 계속 실패했습니다.
+
+**원인**
+1. Spring Security의 CORS 설정이 `nginx` 리버스 프록시를 통한 요청 출처를 허용하지 않고 있었음
+2. MariaDB 시드 데이터의 비밀번호가 이전 버전 BCrypt로 해시되어 있어, 현재 애플리케이션의 BCrypt 버전과 해시 포맷이 맞지 않음
+
+**해결**
+- `SecurityConfig`에 `CorsConfigurationSource`를 명시적으로 등록하고, 허용 Origin에 nginx 프록시 주소를 추가
+- 시드 데이터의 비밀번호를 현재 BCrypt 버전으로 재해시하여 MariaDB에 재삽입
+
+```java
+@Bean
+public CorsConfigurationSource corsConfigurationSource() {
+    CorsConfiguration configuration = new CorsConfiguration();
+    configuration.setAllowedOrigins(List.of("https://onde.click", "http://localhost:3000"));
+    configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));
+    configuration.setAllowCredentials(true);
+    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/**", configuration);
+    return source;
+}
+```
+
+---
+
+### 2. EC2 디스크 공간 100% 소진으로 인한 서버 다운
+
+**문제**
+운영 중이던 `onde.click` EC2 인스턴스가 갑자기 응답하지 않는 문제가 발생했습니다.
+
+**원인**
+Docker 이미지 빌드 및 컨테이너 재시작 과정에서 사용하지 않는 이전 이미지와 컨테이너가 정리되지 않고 계속 누적되어 EC2 디스크 용량이 100% 소진됨
+
+**해결**
+```bash
+# 미사용 Docker 리소스 정리
+docker system prune -af
+
+# 저널 로그 용량 정리
+journalctl --vacuum-time=3d
+```
+이후 CloudWatch Agent로 디스크 사용량 모니터링 및 알람을 설정해 재발을 방지했습니다.
+
+---
+
+### 3. RDS 보안 그룹 인바운드 규칙 불일치로 인한 연결 실패
+
+**문제**
+배포 초기, 백엔드 EC2 컨테이너가 RDS(MariaDB)에 연결하지 못하는 문제가 발생했습니다.
+
+**원인**
+RDS 보안 그룹의 인바운드 규칙이 백엔드 EC2의 보안 그룹을 정확히 참조하지 않고 있었음 — EC2 보안 그룹이 재생성되며 ID가 변경되었으나 RDS 인바운드 규칙에는 반영되지 않았음
+
+**해결**
+Terraform의 RDS 보안 그룹 모듈에서 인바운드 규칙의 `source_security_group_id`를 백엔드 EC2 보안 그룹 리소스를 직접 참조하도록 수정하여, 이후 보안 그룹이 재생성되어도 자동으로 최신 ID가 반영되도록 개선했습니다.
+
+```hcl
+resource "aws_security_group_rule" "rds_from_backend" {
+  type                     = "ingress"
+  from_port                = 3306
+  to_port                  = 3306
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.rds.id
+  source_security_group_id = aws_security_group.backend_ec2.id
+}
+```
