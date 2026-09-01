@@ -203,7 +203,7 @@ Secrets Manager 읽기"]
 |----------|------|------|------|
 | **ALB** | Application Load Balancer | Public Subnet | HTTPS 종단, Host/Path 기반 라우팅 |
 | **Frontend EC2** | t3.small Ubuntu 22.04 | Public Subnet | Nginx React SPA 서빙 |
-| **Backend EC2 x2** | t3.small Ubuntu 22.04 | Private Subnet 2AZ | Spring Boot API api-module |
+| **Backend EC2** | t3.small Ubuntu 22.04 | Private Subnet | Spring Boot API api-module (부하 테스트 후 backend-2 정리, 단일 인스턴스 운영) |
 | **Windows EC2** | t3.medium Windows 2019 | Private Subnet | Spring Boot Admin admin-module :8081 |
 | **RDS MariaDB** | db.t3.small 10.11 | DB Subnet 격리 | 메인 데이터베이스 |
 | **ElastiCache Redis** | cache.t3.micro Redis 7 | DB Subnet | 세션/캐시 |
@@ -403,9 +403,10 @@ EC2는 AWS가 운영하는 PC방의 컴퓨터 한 대를 빌리는 것과 같습
 
 #### 이 프로젝트에서의 라우팅 규칙
 ```
-https://onde.click/admin/... → Windows 백엔드 서버로 전달 (priority 5)
-https://onde.click/api/v1/... → Linux 백엔드 서버로 전달 (priority 10)
-https://onde.click/...       → 프론트엔드 서버로 전달 (기본)
+https://rookies.onde.click/api/v1/admin/... → Windows 백엔드 서버로 전달 (priority 2)
+https://onde.click/api/*, /oauth2/*         → Linux 백엔드 서버로 전달 (priority 10)
+https://rookies.onde.click/...              → 프론트엔드 서버로 전달 (priority 3)
+https://onde.click/...                      → 프론트엔드 서버로 전달 (기본)
 ```
 
 #### 주요 기능
@@ -776,3 +777,19 @@ resource "aws_security_group_rule" "rds_from_backend" {
   source_security_group_id = aws_security_group.backend_ec2.id
 }
 ```
+
+---
+
+### 4. Burp Suite·ZAP 모의해킹을 통한 권한상승 및 결제 조작 취약점 발견
+
+**문제**
+서비스 배포 후 Burp Suite와 OWASP ZAP을 활용해 자체 모의해킹을 진행한 결과, 파라미터 조작을 통한 두 가지 주요 취약점이 발견되었습니다.
+
+**발견 1 — role 파라미터 조작을 통한 권한 상승**
+회원가입 요청의 `role` 파라미터 값을 클라이언트 단에서 임의로 조작하면 일반 사용자가 `SUPER_ADMIN` 권한으로 가입할 수 있는 취약점이 확인되었습니다.
+
+**발견 2 — totalPrice 파라미터 조작을 통한 결제 금액 변조**
+결제 요청의 `totalPrice` 파라미터를 클라이언트 단에서 조작하면 실제 상품 금액과 무관하게 임의의 금액(예: 1원)으로 결제가 승인되는 취약점이 확인되었습니다.
+
+**해결**
+두 취약점 모두 이행점검 이후 백엔드에서 클라이언트가 전달한 값을 신뢰하지 않고, 서버 측에서 권한과 금액을 재검증하도록 직접 수정 조치했습니다.
